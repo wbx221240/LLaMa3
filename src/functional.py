@@ -33,12 +33,13 @@ def matmul_with_importance(
     """
     batch_size, seq_len, hidden_size = input.shape
     embed_size = weight.shape[-1]
-    # first, multi-head split for input A1 and weight W1
+    
+    ## first, multi-head split for input A1 and weight W1
     head_size = hidden_size // num_heads
-    # print(batch_size, seq_len, num_heads, head_size)
     input = input.view(batch_size, seq_len, num_heads, head_size)
     weight = weight.view(num_heads, head_size, embed_size)
-    # second, probability/importance mask with shape of [batch_size, seq_len]
+
+    ## second, probability/importance mask with shape of [batch_size, seq_len]
     probs_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool)
     if top_k is None:
         top_k = seq_len
@@ -46,13 +47,15 @@ def matmul_with_importance(
     probs_mask = probs_mask.scatter_(1, topk_indices, 1)
     probs_mask = torch.where(probs_mask & (probs >= top_p))
     input = input[probs_mask]
+
+    ## third, torch einsum to generate multi-head matmul
     output = torch.einsum("ijh,jhk->ijk", input, weight)
-    # output = output[torch.where(probs_mask)]
+
+    ## fourth, gradient calculation
     if grad_output == None:
         grad_input, grad_weight = None, None
     else:
         grad_input_ = torch.einsum("ijh,jkh->ijk", grad_output, weight)
-        # print(grad_output.permute(1, 2, 0).shape, input.permute(1, 0, 2).shape)
         grad_weight = torch.einsum("ijh,ihk->ijk", input.permute(1, 2, 0), grad_output.permute(1, 0, 2))
         grad_input = torch.zeros((batch_size, seq_len, num_heads, head_size))
         grad_input[probs_mask] = grad_input_
