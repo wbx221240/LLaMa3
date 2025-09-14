@@ -1,3 +1,11 @@
+'''
+Author: wbx221240 221240001@smail.nju.edu.cn
+Date: 2025-09-01 15:17:09
+LastEditors: wbx221240 221240001@smail.nju.edu.cn
+LastEditTime: 2025-09-14 23:45:49
+FilePath: /llama3/src/functional.py
+Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+'''
 from typing import Tuple, Optional
 
 import torch
@@ -49,4 +57,40 @@ def apply_rotary_pos_emb(
     Returns:
         output(torch.Tensor): embedded output tensor, with shape: [batch_size, seq_len, num_heads, head_dim]
     """
-    raise NotImplementedError("TODO: Assignment1 - Task3")
+    batch_size, seq_len, num_heads, head_dim = input.shape
+
+    input = input.permute(0, 2, 1, 3)
+    # print("input(before):", input)
+    # input_even = input[..., ::2]
+    # input_odd = input[..., 1::2]
+    # input = torch.cat((input_even, input_odd), dim=-1)
+    # print("input(after):", input)
+    # permute the input to [batch_size, num_heads, seq_len, head_dim]
+    position_ids = torch.arange(0, seq_len).repeat(batch_size, 1)
+    cos = cos[position_ids].unsqueeze(1) # [seq_len, 1, head_dim] 
+    sin = sin[position_ids].unsqueeze(1) 
+    emb = input * cos + rotate_half(input) * sin
+    # print(restore_interleave(emb.permute(0, 2, 1, 3)))
+    return emb.permute(0, 2, 1, 3) # restore_interleave(emb.permute(0, 2, 1, 3))
+    # raise NotImplementedError("TODO: Assignment1 - Task3")
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotate half of the channels of the input tensoray, this is a trick of LlaMA. It
+    splits the channels into two halves where the first half is even indexed and the second is odd. 
+    They use rotate the second half to the first and reverse the sign
+
+    Args:
+        x (torch.Tensor): _description_
+
+    Returns:
+        torch.Tensor: _description_
+    """
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1) 
+
+def restore_interleave(x:torch.Tensor):
+    d = x.shape[-1] // 2
+    even, odd = x[..., :d], x[..., d:]
+    return torch.stack([even, odd], dim=-1).reshape(*x.shape)
