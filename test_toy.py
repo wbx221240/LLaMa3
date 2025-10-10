@@ -118,6 +118,7 @@ def test_task1(case_key, case_config):
     
     # apply the forward pass
     output = dense_mlp(input)
+    print(output, output_ref)
     
     # check if the output tensor is correct
     assert_close(output, output_ref, atol=atol, rtol=rtol)
