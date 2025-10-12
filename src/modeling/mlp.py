@@ -1,4 +1,5 @@
 from enum import Enum
+from functools import partial
 from typing import Optional
 
 import torch
@@ -208,6 +209,9 @@ class SparseMLPWithLoRA(nn.Module):
             device(str, default = "cpu"): parameter device
         """
         super().__init__()
+        assert not ffh_size % num_experts, "ffh size not divisible by num experts"
+        assert not num_experts % world_size, "num experts not divisible by world_size"
+
         self.hidden_size = hidden_size
         self.ffh_size = ffh_size
         self.activation = ACT2CLS[activation_type]
@@ -225,16 +229,19 @@ class SparseMLPWithLoRA(nn.Module):
         self.factory_kwargs = {"dtype": dtype, "device":device}
         
         self.nle = self.num_experts // self.world_size # this is the number of experts in each rank.
+        self.init_gate_seed = init_base_seed
         self.init_base_seed = init_base_seed + self.rank * self.nle
         self.lora_dropout_seed = lora_dropout_seed + self.rank * self.nle
         self.lora_init_base_seed = lora_init_base_seed + self.rank * self.nle
 
+        self.gate = nn.Parameter(torch.zeros((hidden_size, num_experts), dtype=torch.float32, device=device))
+
         ## create a module list for experts
-        self.experts = nn.ModuleList([DenseMLPWithLoRA(hidden_size // num_experts, ffh_size // num_experts, \
-            activation_type, init_base_seed + i, lora_rank, lora_alpha, lora_dropout_rate, lora_dropout_seed + i, \
-            lora_init_base_seed + i, dtype, device) for i in range(1, self.nle + 1)])
+        self.experts = nn.ModuleList([DenseMLPWithLoRA(hidden_size, ffh_size // num_experts, \
+            activation_type, self.init_base_seed + i, lora_rank, lora_alpha, lora_dropout_rate, self.lora_dropout_seed + i, \
+            self.lora_init_base_seed + i, dtype, device) for i in range(0, self.nle)])
         
-        
+        self.reset_parameters()
         # raise NotImplementedError("Assignment2 - Task2")
         
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -246,10 +253,42 @@ class SparseMLPWithLoRA(nn.Module):
         Returns:
             output(torch.Tensor): output tensor, with shape: [batch_size, seq_len, hidden_size]
         """
+        batch_size, seq_len, hidden_size = input.shape
+        output = torch.zeros((batch_size * seq_len, hidden_size), dtype=self.gate.dtype, device=input.device)
+
+        input = input.view(-1, hidden_size)
+        input_dtype = input.dtype
+        input = input.to(self.gate.dtype)
+        router_logits = torch.matmul(input, self.gate)
+        print(input.shape)
+        print(input)
+
+        router_weights = F.softmax(router_logits, dim=-1, dtype=torch.float)
+        router_weights, selected_gates = torch.topk(router_weights, k=self.moe_topk, dim=-1)
+        router_weights /= router_weights.sum(dim=-1, keepdim=True)
+        print(router_weights.shape)
+        print(router_weights)
+        print(selected_gates)
+        expert_mask = F.one_hot(selected_gates, num_classes=self.num_experts).permute(2, 1, 0)
+        print(expert_mask.shape)
+        print(expert_mask)
+        for expert_id in range(self.nle):
+            expert = self.experts[expert_id]
+            idx, top_x = torch.where(expert_mask[self.rank * self.nle + expert_id])
+
+            current_state = input[None, top_x].reshape(-1, hidden_size)
+            partial_output = expert(current_state) * router_weights[top_x, idx, None]
+
+            output.index_add_(0, top_x, partial_output.to(output.dtype))
+
+        output = output.view(batch_size, seq_len, hidden_size)
+        return output.to(input_dtype)
         # raise NotImplementedError("Assignment2 - Task2")
         
     def reset_parameters(self):
         """Initialize the weights of each local expert from its own distribution \
             and the gating layer from a normal distribution
         """
+        ## initialize the gating matrix.
+        nn.init.normal_(self.gate, self.init_mean, self.init_std, generator=torch.manual_seed(self.init_gate_seed))
         # raise NotImplementedError("Assignment2 - Task2")
